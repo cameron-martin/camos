@@ -5,8 +5,10 @@
 
 use core::panic::PanicInfo;
 
+use camos_bootinfo::BootInfo;
+
 #[unsafe(no_mangle)]
-extern "C" fn _start() {
+extern "C" fn _start(boot_info: &BootInfo) {
     loop {}
 }
 

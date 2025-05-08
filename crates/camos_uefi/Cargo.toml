@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+camos_bootinfo = { path = "../camos_bootinfo" }
 # TODO: Make impl core::Error without nightly flag
 elf = { version = "0.7.4", default-features = false }
 thiserror = { version = "2.0.12", default-features = false }

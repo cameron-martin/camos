@@ -15,13 +15,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c8214115b7bf84099f1309324e63141d4c5d7cc26862f97a0a857dbefe165bd"
 
 [[package]]
+name = "camos_bootinfo"
+version = "0.1.0"
+dependencies = [
+ "uefi",
+]
+
+[[package]]
 name = "camos_kernel"
 version = "0.1.0"
+dependencies = [
+ "camos_bootinfo",
+]
 
 [[package]]
 name = "camos_uefi"
 version = "0.1.0"
 dependencies = [
+ "camos_bootinfo",
  "elf",
  "thiserror",
  "uefi",

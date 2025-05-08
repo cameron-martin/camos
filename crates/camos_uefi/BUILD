@@ -14,7 +14,7 @@ rust_binary(
     aliases = aliases(),
     deps = all_crate_deps(
         normal = True,
-    ),
+    ) + ["//crates/camos_bootinfo"],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
     ),

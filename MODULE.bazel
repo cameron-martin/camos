@@ -25,10 +25,12 @@ crate.from_cargo(
         "//:Cargo.toml",
         "//crates/camos_uefi:Cargo.toml",
         "//crates/camos_kernel:Cargo.toml",
+        "//crates/camos_bootinfo:Cargo.toml",
     ],
     supported_platform_triples = [
         "x86_64-unknown-linux-gnu",
         "x86_64-unknown-uefi",
+        "x86_64-unknown-none",
     ],
 )
 use_repo(crate, "crates")
