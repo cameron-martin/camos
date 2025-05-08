@@ -1,0 +1,7 @@
+{
+    "rust-analyzer.workspace.discoverConfig": {
+        "command": ["scripts/discover_bazel_rust_project.sh"],
+        "progressLabel": "rust_analyzer",
+        "filesToWatch": ["BUILD", "BUILD.bazel", "MODULE.bazel"]
+    }
+}

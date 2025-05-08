@@ -1,4 +1,4 @@
-load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@crates//:defs.bzl", "aliases")
 load("@rules_rust//rust:defs.bzl", "rust_binary")
 
 platform(
@@ -11,18 +11,19 @@ platform(
 
 rust_binary(
     name = "camos_uefi",
-    aliases = aliases(),
-    deps = all_crate_deps(
-        normal = True,
-    ) + ["//crates/camos_bootinfo"],
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-    ),
     srcs = glob(["src/**/*.rs"]),
-    rustc_flags = ["-Cpanic=abort"],
+    aliases = aliases(),
     compile_data = ["//crates/camos_kernel"],
-    rustc_env = { "KERNEL_PATH": "$(execpath //crates/camos_kernel)" },
     # Consider using the platform-data rule here. See https://github.com/bazelbuild/platforms/blob/main/experimental/platform_data/defs.bzl
     # Or here? https://github.com/bazelbuild/rules_platform
     platform = ":x86_uefi",
+    rustc_env = {"KERNEL_PATH": "$(execpath //crates/camos_kernel)"},
+    rustc_flags = ["-Cpanic=abort"],
+    deps = [
+        "//crates/camos_bootinfo",
+        "@crates//:elf",
+        "@crates//:thiserror",
+        "@crates//:uefi",
+        "@crates//:x86_64",
+    ],
 )
