@@ -2,12 +2,16 @@
 #![no_main]
 
 //! Memory layout:
-//! - 0x0000000000000000: Kernel memory
+//! - 0x0000000000000000: Kernel executable
+//! - 0x000000000F000000: Kernel stacks
 //! - 0x00000F0000000000: Physical memory
+
+mod acpi;
+mod output;
 
 use core::{
     arch::asm,
-    fmt::{self, Write},
+    fmt,
     mem,
     panic::PanicInfo,
     ptr,
@@ -15,12 +19,12 @@ use core::{
 
 use camos_bootinfo::BootInfo;
 use elf::{ElfBytes, ParseError, abi::PT_LOAD, endian::AnyEndian};
+use output::COM1;
 use thiserror::Error;
 use uefi::{
-    boot::{
-        self, AllocateType, MemoryDescriptor, MemoryType, OpenProtocolAttributes,
-        OpenProtocolParams,
-    }, mem::memory_map::{MemoryMap, MemoryMapOwned}, prelude::entry, proto::console::gop::{GraphicsOutput, ModeInfo}, runtime::{self, ResetType}, system, Status
+    boot::{self, AllocateType, MemoryType},
+    mem::memory_map::MemoryMap,
+    prelude::entry,
 };
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -28,11 +32,18 @@ use x86_64::{
         FrameAllocator, MappedPageTable, Mapper, Page, PageSize, PageTable, PageTableFlags,
         PhysFrame, Size4KiB,
         mapper::{MapToError, PageTableFrameMapping},
+        page::AddressNotAligned,
     },
 };
 
+type Result<T> = core::result::Result<T, LoaderError>;
+
 static KERNEL: &[u8] = include_bytes!(env!("KERNEL_PATH"));
 
+/// The address of the start of the region of virtual memory containing kernel stacks.
+const STACK_START: VirtAddr = VirtAddr::new(0x000000000F000000);
+
+/// The address where physical memory is mapped.
 const PHYSICAL_MEMORY_START: VirtAddr = VirtAddr::new(0x00000F0000000000);
 
 #[derive(Error, Debug)]
@@ -51,6 +62,8 @@ enum LoaderError {
     FailedAllocation,
     #[error("mapping error")]
     MapTo(MapToError<Size4KiB>),
+    #[error("page address not aligned to a page boundary")]
+    AddressNotAligned,
 }
 
 impl From<ParseError> for LoaderError {
@@ -65,12 +78,9 @@ impl From<MapToError<Size4KiB>> for LoaderError {
     }
 }
 
-impl From<LoaderError> for uefi::Status {
-    fn from(value: LoaderError) -> Self {
-        match value {
-            LoaderError::UefiError(uefi_error) => uefi_error.status(),
-            _ => uefi::Status::ABORTED,
-        }
+impl From<AddressNotAligned> for LoaderError {
+    fn from(_: AddressNotAligned) -> Self {
+        Self::AddressNotAligned
     }
 }
 
@@ -95,58 +105,51 @@ unsafe impl PageTableFrameMapping for IdentityFrameMapping {
 
 #[entry]
 fn efi_main() -> uefi::Status {
-    let Ok(_) = system::with_stdout(|out| writeln!(out, "Hello from Rust!")) else {
-        return uefi::Status::WARN_WRITE_FAILURE;
-    };
-
     match load_os() {
         Ok(()) => uefi::Status::SUCCESS,
-        Err(err) => err.into(),
+        Err(err) => panic!("{err}"),
     }
 }
 
-fn load_os() -> Result<(), LoaderError> {
+fn load_os() -> Result<()> {
     let elf_file = ElfBytes::<AnyEndian>::minimal_parse(KERNEL)?;
 
     let root_page_table = create_root_page_table()?;
 
-    system::with_stdout(|out| writeln!(out, "Created root page table!"))?;
+    println!("Created root page table 🎉!");
 
     map_kernel(root_page_table, &elf_file)?;
+    println!("Mapped kernel executable!");
 
-    system::with_stdout(|out| writeln!(out, "Mapped kernel memory!"))?;
+    let rsp = create_kernel_stack(root_page_table)?;
 
     map_physical_memory(root_page_table)?;
+    println!("Mapped physical memory!");
 
-    system::with_stdout(|out| writeln!(out, "Mapped physical memory!"))?;
+    let boot_info = write_boot_info(BootInfo { serial_base: COM1 })?;
 
-    let (graphics_mode_info, framebuffer) = get_framebuffer()?;
-
-    system::with_stdout(|out| writeln!(out, "Gotten framebuffer!"))?;
-
-    let boot_info = write_boot_info(BootInfo {
-        framebuffer,
-        graphics_mode_info,
-    })?;
-
-    system::with_stdout(|out| writeln!(out, "Written boot info!"))?;
+    println!("Written boot info!");
 
     let memory_map = unsafe { boot::exit_boot_services(None) };
 
-    // system::with_stdout(|out| writeln!(out, "Exited boot services!"))?;
+    println!("Exited boot services!");
 
     let entry_addr = elf_file.ehdr.e_entry;
 
-    // system::with_stdout(|out| writeln!(out, "About to jump to {entry_addr}!"))?;
+    println!("About to jump to {entry_addr:#X}!");
+
+    // unsafe { asm!("hlt") };
 
     unsafe {
         asm! {
             "mov rdi, {boot_info}",
             "add rdi, {phys_start}",
+            "mov rsp, {rsp}",
             "mov cr3, {page_table}",
             "jmp {entry}",
             boot_info = in(reg) boot_info,
             phys_start = in(reg) PHYSICAL_MEMORY_START.as_u64(),
+            rsp = in(reg) rsp.as_u64(),
             page_table = in(reg) root_page_table,
             entry = in(reg) entry_addr,
         }
@@ -155,7 +158,7 @@ fn load_os() -> Result<(), LoaderError> {
     unreachable!()
 }
 
-fn create_root_page_table() -> Result<&'static mut PageTable, LoaderError> {
+fn create_root_page_table() -> Result<&'static mut PageTable> {
     let level_4_table = IdentityFrameMapping.frame_to_pointer(
         UefiFrameAllocator
             .allocate_frame()
@@ -166,10 +169,7 @@ fn create_root_page_table() -> Result<&'static mut PageTable, LoaderError> {
 }
 
 /// Create a virtual memory mapping for the kernel executable
-fn map_kernel(
-    root_page_table: &mut PageTable,
-    elf_file: &ElfBytes<AnyEndian>,
-) -> Result<(), LoaderError> {
+fn map_kernel(root_page_table: &mut PageTable, elf_file: &ElfBytes<AnyEndian>) -> Result<()> {
     let mut frame_allocator = UefiFrameAllocator;
 
     let mut mapper = unsafe { MappedPageTable::new(root_page_table, IdentityFrameMapping) };
@@ -201,7 +201,7 @@ fn map_kernel(
         );
 
         for (page, phys_frame) in virt_range.zip(phys_range) {
-            unsafe {
+            let _ = unsafe {
                 mapper.map_to(
                     page,
                     phys_frame,
@@ -221,8 +221,35 @@ fn map_kernel(
     Ok(())
 }
 
+/// Create a stack for the kernel. Currently this only maps a single page - the second page in the region reserved for kernel stacks.
+fn create_kernel_stack(root_page_table: &mut PageTable) -> Result<VirtAddr> {
+    let mut mapper = unsafe { MappedPageTable::new(root_page_table, IdentityFrameMapping) };
+
+    let page_start = STACK_START + Size4KiB::SIZE;
+
+    let page = Page::<Size4KiB>::from_start_address(page_start)?;
+
+    let kernel_stack_page_address =
+        boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, 1)?;
+    let kernel_stack_phys_frame = PhysFrame::from_start_address(PhysAddr::new(
+        kernel_stack_page_address.addr().get() as u64,
+    ))?;
+
+    unsafe {
+        let _ = mapper.map_to(
+            page,
+            kernel_stack_phys_frame,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+            &mut UefiFrameAllocator,
+        )?;
+    }
+
+    /// Rsp points to the end of the page we have just allocated
+    Ok(page_start + Size4KiB::SIZE)
+}
+
 /// Maps the physical memory in the kernel's virtual memory, at an offset
-fn map_physical_memory(root_page_table: &mut PageTable) -> Result<(), LoaderError> {
+fn map_physical_memory(root_page_table: &mut PageTable) -> Result<()> {
     let memory_map = boot::memory_map(MemoryType::LOADER_DATA)?;
 
     let max_phys_addr = memory_map
@@ -257,28 +284,20 @@ fn map_physical_memory(root_page_table: &mut PageTable) -> Result<(), LoaderErro
     Ok(())
 }
 
-fn get_framebuffer() -> Result<(ModeInfo, *mut u8), LoaderError> {
-    let gop_handle = boot::get_handle_for_protocol::<GraphicsOutput>()?;
+// fn find_serial_port() -> Result<(), LoaderError> {
+//     let rsdp = unsafe { acpi::find_rsdp().unwrap() };
+//     let rsdt = rsdp.rsdt();
 
-    let mut protocol = unsafe {
-        boot::open_protocol::<GraphicsOutput>(
-            OpenProtocolParams {
-                handle: gop_handle,
-                agent: boot::image_handle(),
-                controller: None,
-            },
-            OpenProtocolAttributes::GetProtocol,
-        )?
-    };
+//     system::with_stdout(|out| writeln!(out, "RSDT: {:?}", rsdt))?;
 
-    let mode_info = protocol.current_mode_info();
+//     for entry in rsdt.entries() {
+//         system::with_stdout(|out| writeln!(out, "Entry: {:?}", entry))?;
+//     }
 
-    let framebuffer = protocol.frame_buffer().as_mut_ptr();
+//     Ok(())
+// }
 
-    Ok((mode_info, framebuffer))
-}
-
-fn write_boot_info(boot_info: BootInfo) -> Result<*const BootInfo, LoaderError> {
+fn write_boot_info(boot_info: BootInfo) -> Result<*const BootInfo> {
     const _: () = {
         assert!(mem::align_of::<BootInfo>() <= 8);
     };
@@ -292,6 +311,12 @@ fn write_boot_info(boot_info: BootInfo) -> Result<*const BootInfo, LoaderError> 
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None)
+fn panic(info: &PanicInfo) -> ! {
+    let _ = println!("Received panic: {}!", info.message());
+
+    loop {
+        unsafe { asm!("hlt") }
+    }
+
+    // runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None)
 }

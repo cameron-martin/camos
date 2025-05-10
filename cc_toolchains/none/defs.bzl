@@ -42,7 +42,7 @@ def _config_impl(ctx):
             action_name = ACTION_NAMES.cpp_link_executable,
             tools = [
                 tool(
-                    path = "/usr/bin/lld-link",
+                    path = "/usr/bin/ld.lld",
                 ),
             ],
         ),

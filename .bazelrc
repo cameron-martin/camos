@@ -1,0 +1,4 @@
+build:rust_check --keep_going
+build:rust_check --@rules_rust//:error_format=json
+build:rust_check --@rules_rust//:rustc_output_diagnostics --output_groups=+rustc_rmeta_output,+rustc_output
+build:rust_check --@rules_rust//:extra_rustc_flag=-Copt-level=0

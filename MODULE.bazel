@@ -1,6 +1,9 @@
 bazel_dep(name = "platforms", version = "0.0.11")
 bazel_dep(name = "rules_cc", version = "0.1.1")
+bazel_dep(name = "rules_platform", version = "0.1.0")
 bazel_dep(name = "rules_rust", version = "0.61.0")
+
+local_path_override(module_name = "rules_rust", path = "/home/cameron/Repos/rules_rust")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
@@ -24,6 +27,7 @@ crate.spec(package = "elf", version = "0.7.4", default_features = False)
 crate.spec(package = "thiserror", version = "2.0.12", default_features = False)
 crate.spec(package = "uefi", version = "0.35.0")
 crate.spec(package = "x86_64", version = "0.15.2", default_features = False)
+crate.spec(package = "uart_16550", version = "0.3.2")
 
 crate.from_specs(
     supported_platform_triples = [
