@@ -1,21 +1,10 @@
 #![no_std]
 #![no_main]
 
-//! Memory layout:
-//! - 0x0000000000000000: Kernel executable
-//! - 0x000000000F000000: Kernel stacks
-//! - 0x00000F0000000000: Physical memory
-
 mod acpi;
 mod output;
 
-use core::{
-    arch::asm,
-    fmt,
-    mem,
-    panic::PanicInfo,
-    ptr,
-};
+use core::{arch::asm, fmt, mem, panic::PanicInfo, ptr};
 
 use camos_bootinfo::BootInfo;
 use elf::{ElfBytes, ParseError, abi::PT_LOAD, endian::AnyEndian};
@@ -39,12 +28,21 @@ use x86_64::{
 type Result<T> = core::result::Result<T, LoaderError>;
 
 static KERNEL: &[u8] = include_bytes!(env!("KERNEL_PATH"));
-
-/// The address of the start of the region of virtual memory containing kernel stacks.
-const STACK_START: VirtAddr = VirtAddr::new(0x000000000F000000);
+/// A tiny piece of code that is mapped the virtual address space of both the
+/// kernel and the bootloader, to facilitate transfer of control between the
+/// bootloader and the kernel.
+static TRAMPOLINE: &[u8] = include_bytes!(env!("TRAMPOLINE_PATH"));
 
 /// The address where physical memory is mapped.
-const PHYSICAL_MEMORY_START: VirtAddr = VirtAddr::new(0x00000F0000000000);
+const PHYSICAL_MEMORY_START: VirtAddr = VirtAddr::new(0xFFFF880000000000);
+const PHYSICAL_MEMORY_END: VirtAddr = STACK_START;
+
+/// The address of the start of the kernel executable
+const KERNEL_START: VirtAddr = VirtAddr::new(0xFFFFFFFF80000000);
+const KERNEL_END: VirtAddr = STACK_START;
+
+/// The address of the start of the region of virtual memory containing kernel stacks.
+const STACK_START: VirtAddr = VirtAddr::new(0xFFFFFFFF90000000);
 
 #[derive(Error, Debug)]
 enum LoaderError {
@@ -60,7 +58,7 @@ enum LoaderError {
     InvalidMemoryMap,
     #[error("allocation failed")]
     FailedAllocation,
-    #[error("mapping error")]
+    #[error("mapping error: {0:?}")]
     MapTo(MapToError<Size4KiB>),
     #[error("page address not aligned to a page boundary")]
     AddressNotAligned,
@@ -116,15 +114,25 @@ fn load_os() -> Result<()> {
 
     let root_page_table = create_root_page_table()?;
 
-    println!("Created root page table 🎉!");
+    println!(
+        "Created root page table: {:#X}!",
+        root_page_table as *const _ as usize
+    );
 
     map_kernel(root_page_table, &elf_file)?;
     println!("Mapped kernel executable!");
 
     let rsp = create_kernel_stack(root_page_table)?;
 
+    println!("Created kernel stack at {:#X}!", rsp);
+
     map_physical_memory(root_page_table)?;
+
     println!("Mapped physical memory!");
+
+    let trampoline_addr = allocate_and_map_trampoline(root_page_table)?;
+
+    println!("Allocated trampoline at {:#X}!", trampoline_addr as u64);
 
     let boot_info = write_boot_info(BootInfo { serial_base: COM1 })?;
 
@@ -138,24 +146,60 @@ fn load_os() -> Result<()> {
 
     println!("About to jump to {entry_addr:#X}!");
 
-    // unsafe { asm!("hlt") };
+    let phys_memory_start = PHYSICAL_MEMORY_START.as_u64();
+    let rsp_int = rsp.as_u64();
+
+    // unsafe { asm!("3: jmp 3b") }
 
     unsafe {
         asm! {
             "mov rdi, {boot_info}",
             "add rdi, {phys_start}",
             "mov rsp, {rsp}",
-            "mov cr3, {page_table}",
-            "jmp {entry}",
+            "mov r10, {page_table}",
+            "mov r11, {entry}",
+            "jmp {trampoline}",
             boot_info = in(reg) boot_info,
-            phys_start = in(reg) PHYSICAL_MEMORY_START.as_u64(),
-            rsp = in(reg) rsp.as_u64(),
+            phys_start = in(reg) phys_memory_start,
+            rsp = in(reg) rsp_int,
             page_table = in(reg) root_page_table,
             entry = in(reg) entry_addr,
+            trampoline = in(reg) trampoline_addr,
+            out("r10") _,
+            out("r11") _,
+            out("rdi") _,
         }
     }
 
     unreachable!()
+}
+
+/// Copies the trampoline into physical memory at a location low enough that it
+/// does not conflict with the kernel, and then identity-map it in the kernel's
+/// page table. This allows the trampoline to execute in both the bootloader's
+/// address space and the kernel's.
+fn allocate_and_map_trampoline(root_page_table: &mut PageTable) -> Result<*const u8> {
+    let mut mapper = unsafe { MappedPageTable::new(root_page_table, IdentityFrameMapping) };
+
+    let page_start = boot::allocate_pages(
+        AllocateType::MaxAddress(PHYSICAL_MEMORY_START.as_u64()),
+        MemoryType::BOOT_SERVICES_CODE,
+        1,
+    )?
+    .as_ptr();
+
+    unsafe {
+        ptr::copy_nonoverlapping(TRAMPOLINE.as_ptr(), page_start, TRAMPOLINE.len());
+
+        mapper.map_to(
+            Page::from_start_address(VirtAddr::from_ptr(page_start))?,
+            PhysFrame::from_start_address(PhysAddr::new(page_start as u64))?,
+            PageTableFlags::PRESENT,
+            &mut UefiFrameAllocator,
+        )?;
+    }
+
+    Ok(page_start)
 }
 
 fn create_root_page_table() -> Result<&'static mut PageTable> {
@@ -250,13 +294,41 @@ fn create_kernel_stack(root_page_table: &mut PageTable) -> Result<VirtAddr> {
 
 /// Maps the physical memory in the kernel's virtual memory, at an offset
 fn map_physical_memory(root_page_table: &mut PageTable) -> Result<()> {
+    let types_to_map = [
+        MemoryType::LOADER_CODE,
+        MemoryType::LOADER_DATA,
+        MemoryType::BOOT_SERVICES_CODE,
+        MemoryType::BOOT_SERVICES_DATA,
+        MemoryType::CONVENTIONAL,
+        MemoryType::ACPI_RECLAIM,
+        MemoryType::ACPI_NON_VOLATILE,
+        MemoryType::MMIO,
+        MemoryType::MMIO_PORT_SPACE,
+        MemoryType::PAL_CODE,
+        MemoryType::PERSISTENT_MEMORY,
+    ];
+
     let memory_map = boot::memory_map(MemoryType::LOADER_DATA)?;
 
     let max_phys_addr = memory_map
         .entries()
-        .map(|desc| desc.phys_start + (desc.page_count * boot::PAGE_SIZE as u64))
+        .filter(|desc| types_to_map.contains(&desc.ty))
+        .map(|desc| {
+            println!(
+                "Type: {:?}, start: {:#X}, count: {}",
+                desc.ty, desc.phys_start, desc.page_count
+            );
+
+            desc.phys_start + (desc.page_count * boot::PAGE_SIZE as u64)
+        })
         .max()
         .ok_or(LoaderError::InvalidMemoryMap)?;
+
+    println!(
+        "Max physical address: {:#X}. This means the size is {} MB",
+        max_phys_addr,
+        max_phys_addr / 1024 / 1024
+    );
 
     let mut mapper = unsafe { MappedPageTable::new(root_page_table, IdentityFrameMapping) };
 
@@ -313,6 +385,10 @@ fn write_boot_info(boot_info: BootInfo) -> Result<*const BootInfo> {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let _ = println!("Received panic: {}!", info.message());
+
+    if let Some(location) = info.location() {
+        let _ = println!("Location: {}", location);
+    }
 
     loop {
         unsafe { asm!("hlt") }

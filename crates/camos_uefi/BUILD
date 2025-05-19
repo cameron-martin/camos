@@ -10,9 +10,15 @@ rust_binary(
     name = "camos_uefi",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
-    compile_data = ["//crates/camos_kernel"],
+    compile_data = [
+        "//crates/camos_kernel",
+        ":trampoline",
+    ],
     platform = "//platforms:x86_uefi",
-    rustc_env = {"KERNEL_PATH": "$(execpath //crates/camos_kernel)"},
+    rustc_env = {
+        "KERNEL_PATH": "$(execpath //crates/camos_kernel)",
+        "TRAMPOLINE_PATH": "$(execpath :trampoline)",
+    },
     rustc_flags = ["-Cpanic=abort"] + select({
         ":debug_mode": [
             "-C",
@@ -25,8 +31,15 @@ rust_binary(
         "//crates/camos_bootinfo",
         "@crates//:elf",
         "@crates//:thiserror",
+        "@crates//:uart_16550",
         "@crates//:uefi",
         "@crates//:x86_64",
-        "@crates//:uart_16550",
     ],
+)
+
+genrule(
+    name = "trampoline",
+    srcs = ["trampoline.asm"],
+    outs = ["trampoline.bin"],
+    cmd = "nasm -f bin $(location trampoline.asm) -o $@",
 )
