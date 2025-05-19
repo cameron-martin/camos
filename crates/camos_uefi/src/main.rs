@@ -191,7 +191,7 @@ fn allocate_and_map_trampoline(root_page_table: &mut PageTable) -> Result<*const
     unsafe {
         ptr::copy_nonoverlapping(TRAMPOLINE.as_ptr(), page_start, TRAMPOLINE.len());
 
-        mapper.map_to(
+        let _ = mapper.map_to(
             Page::from_start_address(VirtAddr::from_ptr(page_start))?,
             PhysFrame::from_start_address(PhysAddr::new(page_start as u64))?,
             PageTableFlags::PRESENT,
@@ -218,7 +218,6 @@ fn map_kernel(root_page_table: &mut PageTable, elf_file: &ElfBytes<AnyEndian>) -
 
     let mut mapper = unsafe { MappedPageTable::new(root_page_table, IdentityFrameMapping) };
 
-    let phys_kernel_start = PhysAddr::new(KERNEL.as_ptr() as u64);
     let segments = elf_file.segments().ok_or(LoaderError::InvalidKernelElf)?;
 
     let load_segments = segments
@@ -226,40 +225,69 @@ fn map_kernel(root_page_table: &mut PageTable, elf_file: &ElfBytes<AnyEndian>) -
         .filter(|segment| segment.p_type == PT_LOAD);
 
     for segment in load_segments {
-        let phys_start = phys_kernel_start + segment.p_offset;
-        let len = segment.p_filesz;
+        // The offset into the page where this segment needs to be copied, to
+        // get the correct virtual address.
+        let page_offset = segment.p_vaddr % Size4KiB::SIZE;
+        let vaddr_page_start = VirtAddr::new(segment.p_vaddr - page_offset);
 
-        let virt_start = VirtAddr::new(segment.p_vaddr);
-        let virt_end = virt_start + segment.p_memsz;
+        // The number of pages that need to be allocated to copy this segment into
+        let n_pages = (segment.p_memsz + page_offset).div_ceil(Size4KiB::SIZE);
+
+        println!("Allocating {} pages for elf segment", n_pages);
+
+        // TODO: Don't always allocate this as LOADER_CODE!
+        let allocated_pages = boot::allocate_pages(
+            AllocateType::AnyPages,
+            MemoryType::LOADER_CODE,
+            n_pages as usize,
+        )?
+        .as_ptr();
+
+        unsafe {
+            ptr::copy_nonoverlapping(
+                KERNEL[segment.p_offset as usize..].as_ptr(),
+                allocated_pages.add(page_offset as usize),
+                segment.p_filesz as usize,
+            );
+        }
+
+        // If the size in memory is large than the size in the elf, pad with zeros.
+        if segment.p_memsz > segment.p_filesz {
+            unsafe {
+                ptr::write_bytes(
+                    allocated_pages
+                        .add(page_offset as usize)
+                        .add(segment.p_filesz as usize),
+                    0,
+                    (segment.p_memsz - segment.p_filesz) as usize,
+                );
+            }
+        }
 
         // let permissions = permissions_from_flags(segment.p_flags);
 
-        let virt_range = Page::<Size4KiB>::range_inclusive(
-            Page::containing_address(virt_start),
-            Page::containing_address(virt_start + len),
-        );
+        for i in 0..n_pages {
+            let page =
+                Page::<Size4KiB>::from_start_address(vaddr_page_start + (i * Size4KiB::SIZE))?;
+            let frame = PhysFrame::<Size4KiB>::from_start_address(
+                PhysAddr::new(allocated_pages as u64) + (i * Size4KiB::SIZE),
+            )?;
 
-        let phys_range = PhysFrame::<Size4KiB>::range_inclusive(
-            PhysFrame::containing_address(phys_start),
-            PhysFrame::containing_address(phys_start + len - 1),
-        );
+            println!(
+                "Mapping page starting at virtual address {:#X} to physical address {:#X}",
+                page.start_address(),
+                frame.start_address(),
+            );
 
-        for (page, phys_frame) in virt_range.zip(phys_range) {
             let _ = unsafe {
                 mapper.map_to(
                     page,
-                    phys_frame,
+                    frame,
                     PageTableFlags::PRESENT | PageTableFlags::GLOBAL,
                     &mut frame_allocator,
                 )
             }?;
         }
-
-        // if virt_end > phys_end {
-        //     // TODO: there is a `.bss` section in this segment -> map next
-        //     // (virt_end - phys_end) bytes to free physical frame and initialize
-        //     // them with zero
-        // }
     }
 
     Ok(())
@@ -288,7 +316,7 @@ fn create_kernel_stack(root_page_table: &mut PageTable) -> Result<VirtAddr> {
         )?;
     }
 
-    /// Rsp points to the end of the page we have just allocated
+    // Rsp points to the end of the page we have just allocated
     Ok(page_start + Size4KiB::SIZE)
 }
 
