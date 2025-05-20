@@ -16,3 +16,10 @@ rust_binary(
         "@crates//:uart_16550",
     ],
 )
+
+genrule(
+    name = "asm",
+    srcs = [":camos_kernel"],
+    outs = ["camos_kernel.asm"],
+    cmd = "objdump -M intel -d $(location :camos_kernel) > $@",
+)
