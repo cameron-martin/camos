@@ -29,7 +29,7 @@ if [[ "${2-}" == "debug" ]]; then
 
 fi
 
-qemu-system-x86_64 -d int -no-reboot -m 1G -nographic -drive file=fat:rw:$image_dir,format=raw -bios OVMF.fd $extra_args
+qemu-system-x86_64 -no-reboot -m 1G -nographic -drive file=fat:rw:$image_dir,format=raw -bios OVMF.fd $extra_args
 
 
 rm -fr $image_dir
