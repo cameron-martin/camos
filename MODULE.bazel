@@ -3,8 +3,6 @@ bazel_dep(name = "rules_cc", version = "0.1.1")
 bazel_dep(name = "rules_platform", version = "0.1.0")
 bazel_dep(name = "rules_rust", version = "0.61.0")
 
-local_path_override(module_name = "rules_rust", path = "/home/cameron/Repos/rules_rust")
-
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
