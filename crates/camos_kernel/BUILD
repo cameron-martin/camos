@@ -8,6 +8,7 @@ rust_binary(
     platform = "//platforms:x86_none",
     rustc_flags = [
         "-Cpanic=abort",
+        "-Crelocation-model=static",
         "-Clink-args=--image-base=0xFFFFFFFF80000000",
     ],
     visibility = ["//visibility:public"],
