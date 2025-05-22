@@ -1,6 +1,6 @@
 #![no_std]
 
-use uefi::{mem::memory_map::MemoryMapOwned, proto::console::gop::ModeInfo};
+use uefi::mem::memory_map::MemoryMapOwned;
 
 /// Data passed between the loader and the kernel
 #[repr(C)]

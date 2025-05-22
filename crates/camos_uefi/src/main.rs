@@ -155,8 +155,7 @@ fn load_os() -> Result<()> {
         boot_info as *const _ as usize
     );
 
-    let memory_map = unsafe { boot::exit_boot_services(None) };
-    boot_info.memory_map = Some(memory_map);
+    exit_boot_services(boot_info, root_page_table)?;
 
     println!("Exited boot services!");
 
@@ -334,7 +333,7 @@ fn create_kernel_stack(root_page_table: &mut PageTable) -> Result<VirtAddr> {
     Ok(page_start + Size4KiB::SIZE)
 }
 
-/// Maps the physical memory in the kernel's virtual memory, at an offset
+/// Maps the physical memory in the kernel's virtual memory, at a fixed offset
 fn map_physical_memory(root_page_table: &mut PageTable) -> Result<()> {
     let types_to_map = [
         MemoryType::LOADER_CODE,
@@ -444,6 +443,41 @@ fn write_and_map_boot_info(
     Ok(boot_info)
 }
 
+/// Exits boot services, obtaining the memory map and making this available to
+/// the kernel via BootInfo, ensuring that it is mapped into the kernel's
+/// address space.
+fn exit_boot_services(boot_info: &mut BootInfo, root_page_table: &mut PageTable) -> Result<()> {
+    let memory_map = unsafe { boot::exit_boot_services(None) };
+
+    let mut mapper = unsafe { MappedPageTable::new(root_page_table, IdentityFrameMapping) };
+
+    let memory_map_range = memory_map.buffer().as_ptr_range();
+
+    for page in Page::<Size4KiB>::range_inclusive(
+        Page::containing_address(VirtAddr::from_ptr(memory_map_range.start)),
+        Page::containing_address(VirtAddr::from_ptr(memory_map_range.end) - 1),
+    ) {
+        // Check that this page doesn't conflict with the kernel's address
+        // space. This isn't guaranteed to be true. For this we'd have to ask
+        // UEFI to allocate the memory map at an address below a fixed value,
+        // but until we do this hope for the best.
+        assert!(page.start_address() + page.size() <= KERNEL_START);
+
+        unsafe {
+            let _ = mapper.map_to(
+                page,
+                PhysFrame::from_start_address(PhysAddr::new(page.start_address().as_u64()))?,
+                PageTableFlags::PRESENT,
+                &mut UefiFrameAllocator,
+            );
+        }
+    }
+
+    boot_info.memory_map = Some(memory_map);
+
+    Ok(())
+}
+
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let _ = println!("Received panic: {}!", info.message());
@@ -455,6 +489,4 @@ fn panic(info: &PanicInfo) -> ! {
     loop {
         unsafe { asm!("hlt") }
     }
-
-    // runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None)
 }
