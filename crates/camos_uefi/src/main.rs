@@ -33,16 +33,23 @@ static KERNEL: &[u8] = include_bytes!(env!("KERNEL_PATH"));
 /// bootloader and the kernel.
 static TRAMPOLINE: &[u8] = include_bytes!(env!("TRAMPOLINE_PATH"));
 
+/// The start address of the region of memory reserved by the kernel. This
+/// extends until the end of the whole physical address space. Regions below
+/// this can be used to share memory between the
+const KERNEL_START: VirtAddr = PHYSICAL_MEMORY_START;
+
 /// The address where physical memory is mapped.
-const PHYSICAL_MEMORY_START: VirtAddr = VirtAddr::new(0xFFFF880000000000);
-const PHYSICAL_MEMORY_END: VirtAddr = STACK_START;
+const PHYSICAL_MEMORY_START: VirtAddr = VirtAddr::new(0xFFFF_8800_0000_0000);
+const PHYSICAL_MEMORY_END: VirtAddr = KERNEL_EXECUTABLE_START;
 
 /// The address of the start of the kernel executable
-const KERNEL_START: VirtAddr = VirtAddr::new(0xFFFFFFFF80000000);
-const KERNEL_END: VirtAddr = STACK_START;
+const KERNEL_EXECUTABLE_START: VirtAddr = VirtAddr::new(0xFFFF_FFFF_8000_0000);
+const KERNEL_EXECUTABLE_END: VirtAddr = STACK_START;
 
-/// The address of the start of the region of virtual memory containing kernel stacks.
-const STACK_START: VirtAddr = VirtAddr::new(0xFFFFFFFF90000000);
+/// The address of the start of the region of virtual memory containing kernel
+/// stacks. This does not include the initial kernel stack, which is allocated
+/// in the lower half of the address space.
+const STACK_START: VirtAddr = VirtAddr::new(0xFFFF_FFFF_9000_0000);
 
 #[derive(Error, Debug)]
 enum LoaderError {
@@ -134,11 +141,22 @@ fn load_os() -> Result<()> {
 
     println!("Allocated trampoline at {:#X}!", trampoline_addr as u64);
 
-    let boot_info = write_boot_info(BootInfo { serial_base: COM1 })?;
+    let boot_info = write_and_map_boot_info(
+        root_page_table,
+        BootInfo {
+            serial_base: COM1,
+            memory_map: None,
+            pages: 0,
+        },
+    )?;
 
-    println!("Written boot info!");
+    println!(
+        "Written boot info to address {:#X}!",
+        boot_info as *const _ as usize
+    );
 
     let memory_map = unsafe { boot::exit_boot_services(None) };
+    boot_info.memory_map = Some(memory_map);
 
     println!("Exited boot services!");
 
@@ -153,21 +171,17 @@ fn load_os() -> Result<()> {
 
     unsafe {
         asm! {
-            "mov rdi, {boot_info}",
-            "add rdi, {phys_start}",
             "mov rsp, {rsp}",
             "mov r10, {page_table}",
             "mov r11, {entry}",
             "jmp {trampoline}",
-            boot_info = in(reg) boot_info,
-            phys_start = in(reg) phys_memory_start,
+            in("rdi") boot_info,
             rsp = in(reg) rsp_int,
             page_table = in(reg) root_page_table,
             entry = in(reg) entry_addr,
             trampoline = in(reg) trampoline_addr,
             out("r10") _,
             out("r11") _,
-            out("rdi") _,
         }
     }
 
@@ -182,7 +196,7 @@ fn allocate_and_map_trampoline(root_page_table: &mut PageTable) -> Result<*const
     let mut mapper = unsafe { MappedPageTable::new(root_page_table, IdentityFrameMapping) };
 
     let page_start = boot::allocate_pages(
-        AllocateType::MaxAddress(PHYSICAL_MEMORY_START.as_u64()),
+        AllocateType::MaxAddress(KERNEL_START.as_u64()),
         MemoryType::BOOT_SERVICES_CODE,
         1,
     )?
@@ -397,17 +411,37 @@ fn map_physical_memory(root_page_table: &mut PageTable) -> Result<()> {
 //     Ok(())
 // }
 
-fn write_boot_info(boot_info: BootInfo) -> Result<*const BootInfo> {
-    const _: () = {
-        assert!(mem::align_of::<BootInfo>() <= 8);
-    };
+fn write_and_map_boot_info(
+    root_page_table: &mut PageTable,
+    boot_info: BootInfo,
+) -> Result<&'static mut BootInfo> {
+    let pages_for_boot_info = mem::size_of::<BootInfo>().div_ceil(boot::PAGE_SIZE);
 
-    let ptr = boot::allocate_pool(MemoryType::LOADER_DATA, mem::size_of::<BootInfo>())?;
+    let ptr = boot::allocate_pages(
+        AllocateType::MaxAddress(KERNEL_START.as_u64()),
+        MemoryType::LOADER_DATA,
+        pages_for_boot_info,
+    )?;
     let ptr = ptr.as_ptr() as *mut BootInfo;
+
+    // Identity-map this into the kernel's page table
+    let mut mapper = unsafe { MappedPageTable::new(root_page_table, IdentityFrameMapping) };
+
+    unsafe {
+        let _ = mapper.map_to(
+            Page::from_start_address(VirtAddr::from_ptr(ptr))?,
+            PhysFrame::from_start_address(PhysAddr::new(ptr as u64))?,
+            PageTableFlags::PRESENT,
+            &mut UefiFrameAllocator,
+        )?;
+    }
 
     unsafe { ptr::write(ptr, boot_info) };
 
-    Ok(ptr)
+    let boot_info = unsafe { &mut *ptr };
+    boot_info.pages = pages_for_boot_info;
+
+    Ok(boot_info)
 }
 
 #[panic_handler]

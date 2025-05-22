@@ -15,6 +15,8 @@ rust_binary(
     deps = [
         "//crates/camos_bootinfo",
         "@crates//:uart_16550",
+        "@crates//:uefi",
+        "@crates//:x86_64",
     ],
 )
 
