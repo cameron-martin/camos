@@ -4,6 +4,12 @@
         "progressLabel": "rust_analyzer",
         "filesToWatch": ["BUILD", "BUILD.bazel", "MODULE.bazel"]
     },
+    "[rust]": {
+        "editor.formatOnSave": true
+    },
+    "[starlark]": {
+        "editor.formatOnSave": true
+    }
     // "rust-analyzer.cargo.buildScripts.overrideCommand": ["bazel", "build", "--config=rust_check", "//..."],
     // "rust-analyzer.check.overrideCommand": ["bazel", "build", "--config=rust_check", "//..."],
 }
