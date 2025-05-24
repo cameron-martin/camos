@@ -171,16 +171,12 @@ fn load_os() -> Result<()> {
     unsafe {
         asm! {
             "mov rsp, {rsp}",
-            "mov r10, {page_table}",
-            "mov r11, {entry}",
             "jmp {trampoline}",
             in("rdi") boot_info,
+            in("r10") root_page_table,
+            in("r11") entry_addr,
             rsp = in(reg) rsp_int,
-            page_table = in(reg) root_page_table,
-            entry = in(reg) entry_addr,
             trampoline = in(reg) trampoline_addr,
-            out("r10") _,
-            out("r11") _,
         }
     }
 
