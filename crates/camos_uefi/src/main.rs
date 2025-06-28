@@ -145,6 +145,7 @@ fn load_os() -> Result<()> {
         root_page_table,
         BootInfo {
             serial_base: COM1,
+            physical_offset: PHYSICAL_MEMORY_START,
             memory_map: None,
             pages: 0,
         },
@@ -384,7 +385,7 @@ fn map_physical_memory(root_page_table: &mut PageTable) -> Result<()> {
             mapper.map_to(
                 page,
                 phys_frame,
-                PageTableFlags::PRESENT | PageTableFlags::GLOBAL,
+                PageTableFlags::PRESENT | PageTableFlags::GLOBAL | PageTableFlags::WRITABLE,
                 &mut UefiFrameAllocator,
             )
         }?;

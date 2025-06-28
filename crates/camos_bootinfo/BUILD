@@ -7,5 +7,8 @@ rust_library(
     aliases = aliases(),
     # rustc_flags = ["-Cpanic=abort"],
     visibility = ["//visibility:public"],
-    deps = ["@crates//:uefi"],
+    deps = [
+        "@crates//:uefi",
+        "@crates//:x86_64",
+    ],
 )

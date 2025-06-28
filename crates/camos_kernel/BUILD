@@ -1,9 +1,9 @@
 load("@crates//:defs.bzl", "aliases")
-load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 
 rust_binary(
     name = "camos_kernel",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = ["src/main.rs"],
     aliases = aliases(),
     platform = "//platforms:x86_none",
     rustc_flags = [
@@ -13,11 +13,28 @@ rust_binary(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":camos_kernel_lib",
         "//crates/camos_bootinfo",
         "@crates//:uart_16550",
         "@crates//:uefi",
         "@crates//:x86_64",
     ],
+)
+
+rust_library(
+    name = "camos_kernel_lib",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    deps = [
+        "@crates//:uart_16550",
+        "@crates//:uefi",
+        "@crates//:x86_64",
+    ],
+)
+
+rust_test(
+    name = "unit_tests",
+    crate = ":camos_kernel_lib",
 )
 
 genrule(
