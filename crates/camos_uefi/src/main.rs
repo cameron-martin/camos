@@ -38,18 +38,26 @@ static TRAMPOLINE: &[u8] = include_bytes!(env!("TRAMPOLINE_PATH"));
 /// this can be used to share memory between the
 const KERNEL_START: VirtAddr = PHYSICAL_MEMORY_START;
 
-/// The address where physical memory is mapped.
-const PHYSICAL_MEMORY_START: VirtAddr = VirtAddr::new(0xFFFF_8800_0000_0000);
-const PHYSICAL_MEMORY_END: VirtAddr = KERNEL_EXECUTABLE_START;
-
-/// The address of the start of the kernel executable
-const KERNEL_EXECUTABLE_START: VirtAddr = VirtAddr::new(0xFFFF_FFFF_8000_0000);
-const KERNEL_EXECUTABLE_END: VirtAddr = STACK_START;
+/// The address where physical memory is mapped (region size: 8TiB)
+const PHYSICAL_MEMORY_START: VirtAddr = VirtAddr::new(0xFFFF_8000_0000_0000);
+const PHYSICAL_MEMORY_END: VirtAddr = STACK_START;
 
 /// The address of the start of the region of virtual memory containing kernel
 /// stacks. This does not include the initial kernel stack, which is allocated
-/// in the lower half of the address space.
-const STACK_START: VirtAddr = VirtAddr::new(0xFFFF_FFFF_9000_0000);
+/// in the lower half of the address space (region size: 4GiB)
+const STACK_START: VirtAddr = VirtAddr::new(0xFFFF_8800_0000_0000);
+const STACK_END: VirtAddr = HEAP_START;
+
+/// The address of the start of the region of virtual memory containing the
+/// kernel heap (region size: 4GiB)
+const HEAP_START: VirtAddr = VirtAddr::new(0xFFFF_8801_0000_0000);
+const HEAP_END: VirtAddr = VirtAddr::new(0xFFFF_8802_0000_0000);
+
+/// The address of the start of the kernel executable & data (region size: 1.984375 GiB).
+/// The location of this is defined by the kernel code model in the System V ABI.
+/// See https://github.com/hjl-tools/x86-psABI/wiki/x86-64-psABI-1.0.pdf
+const KERNEL_EXECUTABLE_START: VirtAddr = VirtAddr::new(0xFFFF_FFFF_8000_0000);
+const KERNEL_EXECUTABLE_END: VirtAddr = VirtAddr::new(0xFFFF_FFFF_FF00_0000);
 
 #[derive(Error, Debug)]
 enum LoaderError {
@@ -145,7 +153,8 @@ fn load_os() -> Result<()> {
         root_page_table,
         BootInfo {
             serial_base: COM1,
-            physical_offset: PHYSICAL_MEMORY_START,
+            physical_range: PHYSICAL_MEMORY_START..PHYSICAL_MEMORY_END,
+            heap_range: HEAP_START..HEAP_END,
             memory_map: None,
             pages: 0,
         },
@@ -166,8 +175,6 @@ fn load_os() -> Result<()> {
 
     let phys_memory_start = PHYSICAL_MEMORY_START.as_u64();
     let rsp_int = rsp.as_u64();
-
-    // unsafe { asm!("3: jmp 3b") }
 
     unsafe {
         asm! {

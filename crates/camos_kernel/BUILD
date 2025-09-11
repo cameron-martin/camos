@@ -9,6 +9,9 @@ rust_binary(
     rustc_flags = [
         "-Cpanic=abort",
         "-Crelocation-model=static",
+        # This address range is defined by the SystemV ABI:
+        # https://github.com/hjl-tools/x86-psABI/wiki/x86-64-psABI-1.0.pdf
+        "-Ccode-model=kernel",
         "-Clink-args=--image-base=0xFFFFFFFF80000000",
     ],
     visibility = ["//visibility:public"],

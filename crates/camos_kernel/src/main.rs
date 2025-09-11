@@ -18,7 +18,7 @@ extern "C" fn _start(boot_info: &BootInfo) {
     let phys_manager = PhysicalMemoryManager::init(
         &mut serial,
         boot_info.memory_map.as_ref().unwrap(),
-        boot_info.physical_offset,
+        boot_info.physical_range.start,
     );
 
     writeln!(serial, "{}", phys_manager);
