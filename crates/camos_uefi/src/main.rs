@@ -274,7 +274,13 @@ fn map_kernel(root_page_table: &mut PageTable, elf_file: &ElfBytes<AnyEndian>) -
             }
         }
 
-        // let permissions = permissions_from_flags(segment.p_flags);
+        if vaddr_page_start < KERNEL_EXECUTABLE_START
+            || vaddr_page_start + (n_pages * Size4KiB::SIZE) > KERNEL_EXECUTABLE_END
+        {
+            panic!(
+                "The kernel contains a segment that is outside of the virtual address range reserved for the kernel code and data"
+            );
+        }
 
         for i in 0..n_pages {
             let page =
@@ -374,6 +380,12 @@ fn map_physical_memory(root_page_table: &mut PageTable) -> Result<()> {
         Page::containing_address(PHYSICAL_MEMORY_START),
         Page::containing_address(PHYSICAL_MEMORY_START + max_phys_addr - 1),
     );
+
+    if virt_range.end.start_address() + Size4KiB::SIZE > PHYSICAL_MEMORY_END {
+        panic!(
+            "The size of the physical memory exceeds the size of the region in virtual memory reserved for the physical memory map"
+        );
+    }
 
     let phys_range = PhysFrame::<Size4KiB>::range_inclusive(
         PhysFrame::containing_address(PhysAddr::new(0)),
