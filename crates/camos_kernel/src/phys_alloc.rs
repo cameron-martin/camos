@@ -5,12 +5,12 @@ use core::{
     iter,
     ops::Range,
     ptr,
-    sync::atomic::{self, AtomicU8},
+    sync::atomic::{self, AtomicU64},
 };
 
 use uart_16550::SerialPort;
 use uefi::boot::{self, MemoryDescriptor, MemoryType};
-use x86_64::{PhysAddr, VirtAddr};
+use x86_64::{PhysAddr, VirtAddr, structures::paging::PhysFrame};
 
 use crate::{PAGE_SIZE, memory_map::MemoryMap};
 
@@ -28,8 +28,12 @@ fn usable_entries<'a>(
         .filter(|desc| USABLE_PHYSICAL_MEMORY_TYPES.contains(&desc.ty))
 }
 
+/// An allocator for pages of physical memory. It uses a bitmap to store which
+/// pages are allocated, where 1 in the bitmap means free. The bitmap is
+/// operated on in 64-bit words, where the least significant bit denotes the
+/// availability of the lowest-index page in that range.
 pub struct PhysicalMemoryManager {
-    bitmap_ptr: *mut u8,
+    bitmap_ptr: *mut u64,
     /// The number of physical pages managed by this bitmap. Note this is _not_
     /// the number of pages the bitmap takes up in memory.
     page_count: u64,
@@ -47,15 +51,17 @@ impl PhysicalMemoryManager {
             .map(|addr_limit| addr_limit.div_ceil(PAGE_SIZE))
             .unwrap_or(0);
 
-        // Bitmap size in bytes
-        let bitmap_size = physical_page_count.div_ceil(8);
+        let bitmap_size_words = physical_page_count.div_ceil(64);
+        // We always address the bitmap in 64-bit words, so we have to
+        // allocate enough to accomodate for this
+        let bitmap_size_bytes = bitmap_size_words * 8;
 
         writeln!(
             serial,
             "Physical page count: {}, Bitmap size: {} bytes in {} pages",
             physical_page_count,
-            bitmap_size,
-            bitmap_size.div_ceil(PAGE_SIZE)
+            bitmap_size_bytes,
+            bitmap_size_bytes.div_ceil(PAGE_SIZE)
         );
 
         // Find somewhere to put the bitmap pages. This doesn't merge adjacent
@@ -63,16 +69,16 @@ impl PhysicalMemoryManager {
         // to store this fairly small data structure. The regions will naturally
         // get merged once we add them to the bitmap.
         let bitmap_address = usable_entries(memory_map)
-            .find(|&desc| desc.page_count * boot::PAGE_SIZE as u64 >= bitmap_size)
+            .find(|&desc| desc.page_count * boot::PAGE_SIZE as u64 >= bitmap_size_bytes)
             .map(|desc| PhysAddr::new(desc.phys_start))
             .expect("Cannot find bitmap address");
 
-        // This page indices that are taken by the bitmap itself
+        // The page indices that are taken by the bitmap itself
         let bitmap_page_range = (bitmap_address.as_u64() / PAGE_SIZE)
-            ..(bitmap_address.as_u64() + bitmap_size).div_ceil(PAGE_SIZE);
+            ..(bitmap_address.as_u64() + bitmap_size_bytes).div_ceil(PAGE_SIZE);
 
         // The location of the bitmap in virtual memory
-        let bitmap_ptr = (physical_offset.as_u64() + bitmap_address.as_u64()) as *mut u8;
+        let bitmap_ptr = (physical_offset.as_u64() + bitmap_address.as_u64()) as *mut u64;
 
         writeln!(
             serial,
@@ -83,7 +89,7 @@ impl PhysicalMemoryManager {
         // Zero out the bitmap. Zero here means not available, and available
         // regions will be explicitly added.
         unsafe {
-            ptr::write_bytes(bitmap_ptr, 0, bitmap_size as usize);
+            ptr::write_bytes(bitmap_ptr, 0, bitmap_size_words as usize);
         }
 
         let manager = Self {
@@ -101,7 +107,7 @@ impl PhysicalMemoryManager {
 
             for page_index in page_start..page_end {
                 if !bitmap_page_range.contains(&page_index) {
-                    manager.free_page_by_index(page_index);
+                    manager.free_page(page_index);
                 }
             }
         }
@@ -109,28 +115,68 @@ impl PhysicalMemoryManager {
         manager
     }
 
-    /// Returns the byte, plus a mask for the bit
-    fn get_bit(&self, page_index: u64) -> (&AtomicU8, u8) {
-        let byte_offset = page_index / 8;
-        let bit_offset = page_index % 8;
+    /// Returns the byte containing the bit for a certain page, plus a mask for the bit
+    fn get_word(&self, page_index: u64) -> (&AtomicU64, u64) {
+        let word_offset = page_index / 64;
+        let bit_offset = page_index % 64;
 
-        let mask = 1 << (7 - bit_offset);
+        let mask = 1u64 << bit_offset;
 
-        let byte = unsafe { AtomicU8::from_ptr(self.bitmap_ptr.add(byte_offset as usize)) };
+        let byte = unsafe { AtomicU64::from_ptr(self.bitmap_ptr.add(word_offset as usize)) };
 
         (byte, mask)
     }
 
-    fn free_page_by_index(&self, page_index: u64) {
-        let (byte, mask) = self.get_bit(page_index);
+    pub fn free_page(&self, page_index: u64) {
+        let (word, mask) = self.get_word(page_index);
 
-        byte.fetch_or(mask, atomic::Ordering::Relaxed);
+        word.fetch_or(mask, atomic::Ordering::Relaxed);
+    }
+
+    /// Allocates a single physical page. Returns the index to it
+    pub fn allocate_page(&self) -> Option<u64> {
+        let mut ptr = self.bitmap_ptr as *mut u64;
+        // The page index that the current bitmap word starts at
+        let mut idx_start = 0;
+
+        while idx_start < self.page_count {
+            let bitmap_word = unsafe { AtomicU64::from_ptr(ptr) };
+
+            let mut prev = bitmap_word.load(atomic::Ordering::SeqCst);
+            loop {
+                // No pages are available in this word
+                if prev == 0 {
+                    break;
+                }
+
+                // Zero out the first set bit
+                let next = prev & !(1u64 << prev.trailing_zeros());
+                match bitmap_word.compare_exchange_weak(
+                    prev,
+                    next,
+                    atomic::Ordering::SeqCst,
+                    atomic::Ordering::SeqCst,
+                ) {
+                    Ok(_) => {
+                        let page_index = idx_start + prev.trailing_zeros() as u64;
+
+                        return Some(page_index);
+                    }
+                    Err(next_prev) => prev = next_prev,
+                }
+            }
+
+            ptr = unsafe { ptr.add(1) };
+            idx_start += 64;
+        }
+
+        None
     }
 
     fn is_available(&self, page_index: u64) -> bool {
-        let (byte, mask) = self.get_bit(page_index);
+        let (word, mask) = self.get_word(page_index);
 
-        byte.load(atomic::Ordering::Relaxed) & mask != 0
+        word.load(atomic::Ordering::Relaxed) & mask != 0
     }
 
     fn available_regions(&self) -> impl Iterator<Item = Range<u64>> {
@@ -182,7 +228,7 @@ mod tests {
 
     use core::alloc::Layout;
     use std::{
-        alloc, format, io, println,
+        alloc, eprintln, format, io, println,
         string::{String, ToString},
         vec,
     };
@@ -223,10 +269,11 @@ mod tests {
         }
     }
 
-    /// One two-page usable range. The first will be the memory map and the
-    /// second will be available for allocations
+    /// Tests that we are computing the usable ranges correctly, with one
+    /// two-page usable range. The first will be the memory map and the second
+    /// will be available for allocations.
     #[test]
-    fn single_usable_range() {
+    fn avilable_regions_with_single_usable_range() {
         let mut serial = String::new();
 
         let memory = PhysicalMemory::new(2);
@@ -254,10 +301,11 @@ mod tests {
         );
     }
 
-    /// 6 pages. The first page will be used for the memory map and the rest
-    /// will be usable, except for one page in the middle:
+    /// Tests that we are computing the usable ranges correctly, with 6 pages.
+    /// The first page will be used for the memory map and the rest will be
+    /// usable, except for one page in the middle.
     #[test]
-    fn multiple_usable_range() {
+    fn avilable_regions_with_multiple_usable_ranges() {
         let mut serial = String::new();
 
         let memory = PhysicalMemory::new(6);
@@ -285,8 +333,6 @@ mod tests {
             VirtAddr::from_ptr(memory.allocation),
         );
 
-        // println!("{}", serial);
-
         assert!(!memory_manager.is_available(0));
         assert!(memory_manager.is_available(1));
         assert!(memory_manager.is_available(2));
@@ -299,5 +345,69 @@ mod tests {
             "Available Memory Regions:\n0x1000..0x3000: 2 pages\n0x4000..0x6000: 2 pages\n"
                 .to_string()
         );
+    }
+
+    /// Tests that we can allocate pages.
+    #[test]
+    fn page_allocation() {
+        let mut serial = String::new();
+
+        let memory = PhysicalMemory::new(10);
+
+        let memory_map = TestMemoryMap::new(vec![MemoryDescriptor {
+            ty: MemoryType::CONVENTIONAL,
+            att: MemoryAttribute::empty(),
+            page_count: 10,
+            phys_start: 0,
+            virt_start: 0,
+        }]);
+
+        let memory_manager = PhysicalMemoryManager::init(
+            &mut serial,
+            &memory_map,
+            VirtAddr::from_ptr(memory.allocation),
+        );
+
+        let expected_page_index = 1;
+
+        assert!(memory_manager.is_available(expected_page_index));
+
+        let actual_page_index = memory_manager.allocate_page().unwrap();
+
+        assert_eq!(actual_page_index, expected_page_index);
+
+        assert!(!memory_manager.is_available(expected_page_index));
+    }
+
+    /// Not all bits in the last word in the bitmap will be valid, if the
+    /// number of pages does not happen to be a multiple of 64. This tests that
+    /// we limit the last word, avoiding allocation of physical memory that
+    /// does not exist.
+    #[test]
+    fn page_allocation_overflow() {
+        let mut serial = String::new();
+
+        let memory = PhysicalMemory::new(7);
+
+        let memory_map = TestMemoryMap::new(vec![MemoryDescriptor {
+            ty: MemoryType::CONVENTIONAL,
+            att: MemoryAttribute::empty(),
+            page_count: 7,
+            phys_start: 0,
+            virt_start: 0,
+        }]);
+
+        let memory_manager = PhysicalMemoryManager::init(
+            &mut serial,
+            &memory_map,
+            VirtAddr::from_ptr(memory.allocation),
+        );
+
+        // One page is taken up by the bitmap, so we can only allocate 6 pages
+        for _ in 0..6 {
+            memory_manager.allocate_page().unwrap();
+        }
+
+        assert_eq!(memory_manager.allocate_page(), None);
     }
 }
