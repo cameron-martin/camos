@@ -8,9 +8,8 @@ use core::{
     sync::atomic::{self, AtomicU64},
 };
 
-use uart_16550::SerialPort;
 use uefi::boot::{self, MemoryDescriptor, MemoryType};
-use x86_64::{PhysAddr, VirtAddr, structures::paging::PhysFrame};
+use x86_64::{PhysAddr, VirtAddr};
 
 use crate::{PAGE_SIZE, memory_map::MemoryMap};
 
@@ -228,7 +227,7 @@ mod tests {
 
     use core::alloc::Layout;
     use std::{
-        alloc, eprintln, format, io, println,
+        alloc, format,
         string::{String, ToString},
         vec,
     };
