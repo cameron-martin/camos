@@ -84,7 +84,7 @@ mod tests {
     fn spinlock_usage() {
         static COUNTER: SpinLock<u64> = SpinLock::new(0);
 
-        for i in 0..100 {
+        for _ in 0..100 {
             let mut counter = COUNTER.lock();
 
             *counter += 1;

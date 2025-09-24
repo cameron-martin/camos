@@ -2,6 +2,7 @@
 
 use x86_64::structures::paging::{PageSize, Size4KiB};
 
+pub mod dynamic_alloc;
 mod memory_map;
 pub mod phys_alloc;
 pub mod spinlock;

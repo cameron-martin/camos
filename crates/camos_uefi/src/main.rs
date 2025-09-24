@@ -306,7 +306,8 @@ fn map_kernel(root_page_table: &mut PageTable, elf_file: &ElfBytes<AnyEndian>) -
                 mapper.map_to(
                     page,
                     frame,
-                    PageTableFlags::PRESENT | PageTableFlags::GLOBAL,
+                    // TODO: Can we map the code in as read-only?
+                    PageTableFlags::PRESENT | PageTableFlags::GLOBAL | PageTableFlags::WRITABLE,
                     &mut frame_allocator,
                 )
             }?;

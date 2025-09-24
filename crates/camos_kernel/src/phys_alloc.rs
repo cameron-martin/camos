@@ -4,12 +4,15 @@ use core::{
     fmt::{self, Write},
     iter,
     ops::Range,
-    ptr,
+    ptr::{self, NonNull},
     sync::atomic::{self, AtomicU64},
 };
 
 use uefi::boot::{self, MemoryDescriptor, MemoryType};
-use x86_64::{PhysAddr, VirtAddr};
+use x86_64::{
+    PhysAddr, VirtAddr,
+    structures::paging::{PageSize, PhysFrame, Size4KiB},
+};
 
 use crate::{PAGE_SIZE, memory_map::MemoryMap};
 
@@ -27,12 +30,39 @@ fn usable_entries<'a>(
         .filter(|desc| USABLE_PHYSICAL_MEMORY_TYPES.contains(&desc.ty))
 }
 
+#[derive(Debug, PartialEq)]
+pub struct PageAllocation {
+    index: u64,
+    /// The offset into virtual memory where the whole of physical memory is mapped
+    physical_offset: VirtAddr,
+}
+
+impl PageAllocation {
+    fn new(index: u64, physical_offset: VirtAddr) -> Self {
+        Self {
+            index,
+            physical_offset,
+        }
+    }
+
+    pub fn frame(&self) -> PhysFrame<Size4KiB> {
+        PhysFrame::from_start_address(PhysAddr::new(self.index * Size4KiB::SIZE)).unwrap()
+    }
+
+    pub fn as_ptr(&self) -> NonNull<u8> {
+        NonNull::new((self.physical_offset + self.frame().start_address().as_u64()).as_mut_ptr())
+            .unwrap()
+    }
+}
+
 /// An allocator for pages of physical memory. It uses a bitmap to store which
 /// pages are allocated, where 1 in the bitmap means free. The bitmap is
 /// operated on in 64-bit words, where the least significant bit denotes the
 /// availability of the lowest-index page in that range.
 pub struct PhysicalMemoryManager {
     bitmap_ptr: *mut u64,
+    /// The offset into virtual memory where the whole of physical memory is mapped
+    physical_offset: VirtAddr,
     /// The number of physical pages managed by this bitmap. Note this is _not_
     /// the number of pages the bitmap takes up in memory.
     page_count: u64,
@@ -94,6 +124,7 @@ impl PhysicalMemoryManager {
         let manager = Self {
             bitmap_ptr,
             page_count: physical_page_count,
+            physical_offset,
         };
 
         for desc in usable_entries(memory_map) {
@@ -133,7 +164,7 @@ impl PhysicalMemoryManager {
     }
 
     /// Allocates a single physical page. Returns the index to it
-    pub fn allocate_page(&self) -> Option<u64> {
+    pub fn allocate_page(&self) -> Option<PageAllocation> {
         let mut ptr = self.bitmap_ptr as *mut u64;
         // The page index that the current bitmap word starts at
         let mut idx_start = 0;
@@ -159,7 +190,7 @@ impl PhysicalMemoryManager {
                     Ok(_) => {
                         let page_index = idx_start + prev.trailing_zeros() as u64;
 
-                        return Some(page_index);
+                        return Some(PageAllocation::new(page_index, self.physical_offset));
                     }
                     Err(next_prev) => prev = next_prev,
                 }
@@ -371,9 +402,9 @@ mod tests {
 
         assert!(memory_manager.is_available(expected_page_index));
 
-        let actual_page_index = memory_manager.allocate_page().unwrap();
+        let actual_allocation = memory_manager.allocate_page().unwrap();
 
-        assert_eq!(actual_page_index, expected_page_index);
+        assert_eq!(actual_allocation.index, expected_page_index);
 
         assert!(!memory_manager.is_available(expected_page_index));
     }
